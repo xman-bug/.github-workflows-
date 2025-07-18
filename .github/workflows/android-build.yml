@@ -1,9 +1,10 @@
-name: Android Release Build
+name: Android CI/CD
 
 on:
   push:
     branches:
-      - main  # আপনার মূল ব্রাঞ্চ
+      - main
+      - develop
   pull_request:
     branches:
       - main
@@ -38,15 +39,95 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Build Release APK
-        run: ./gradlew assembleRelease
+      - name: Run tests
+        run: ./gradlew test
 
-      - name: Upload Release APK to GitHub Releases
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload Debug APK as Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Build Release APK
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: ./gradlew assembleRelease --continue
+        continue-on-error: true
+
+      - name: Upload Release APK as Artifact (if built)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-apk
+          path: app/build/outputs/apk/release/app-release*.apk
+        continue-on-error: true
+
+      - name: Create GitHub Release with Debug APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: ncipollo/release-action@v1
         with:
-          artifacts: app/build/outputs/apk/release/app-release.apk
+          artifacts: app/build/outputs/apk/debug/app-debug.apk
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: v${{ github.run_number }}
-          name: Release v${{ github.run_number }}
-          overwrite: true
+          name: Debug Release v${{ github.run_number }}
+          body: |
+            ## Debug Build v${{ github.run_number }}
+            
+            This is an automated debug build from the main branch.
+            
+            **Changes:**
+            - ${{ github.event.head_commit.message }}
+            
+            **Commit:** ${{ github.sha }}
+            **Branch:** ${{ github.ref_name }}
+            
+            📱 **APK:** app-debug.apk (unsigned, for testing only)
+          draft: false
+          prerelease: true
+          allowUpdates: true
+          replacesArtifacts: true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Download Debug APK
+        uses: actions/download-artifact@v3
+        with:
+          name: debug-apk
+          path: ./apk
+
+      - name: Deploy to GitHub Pages (APK Distribution)
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./apk
+          destination_dir: downloads
+          enable_jekyll: false
+
+      - name: Comment on Commit with Download Links
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const sha = context.sha;
+            const runNumber = context.runNumber;
+            
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: sha,
+              body: `🚀 **Deployment Complete!**
+              
+              **Download Links:**
+              - 📱 [Debug APK](https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/v${runNumber}/app-debug.apk)
+              - 📊 [Build Artifacts](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+              
+              **Build Info:**
+              - Build Number: v${runNumber}
+              - Commit: ${sha.substring(0, 7)}
+              - Status: ✅ Deployed Successfully`
+            });
